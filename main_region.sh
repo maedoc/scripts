@@ -34,6 +34,14 @@ echo "config file not correct"
 exit 1
 fi
 
+#### uncompress T1 first if necessary
+if [ -f $PRD/data/T1/T1.nii.gz ]
+then
+echo "decompressing T1.nii.gz to T1.nii"
+cat $PRD/data/T1/T1.nii.gz | gunzip - > $PRD/data/T1/T1.nii;
+fi
+
+
 ######### build cortical surface and region mapping
 if [ ! -f $PRD/data/T1/T1.nii ]
 then
@@ -48,21 +56,30 @@ mkdir -p $PRD/"$SUBJ_ID"_regions/connectivity
 # mrconvert
 if [ ! -f $PRD/connectivity_regions/dwi.mif ]
 then
-if [ -f $PRD/data/DWI/*.nii ]
-then
-ls $PRD/data/DWI/ | grep .nii | xargs -I {} mrconvert $PRD/data/DWI/{} $PRD/connectivity_regions/dwi.mif 
-else
-mrconvert $PRD/data/DWI/ $PRD/connectivity_regions/dwi.mif
-fi
+	if [ -f $PRD/data/DWI/*.nii.gz ]
+	then
+		for dwi_nii_gz in `ls $PRD/data/DWI/*.nii.gz`
+		do
+			dwi_nii=${dwi_nii_gz%.gz} 
+			echo "found gzipped images $dwi_nii_gz, decompressing to $dwi_nii.."
+			cat $dwi_nii_gz | gunzip - > $dwi_nii;
+		done
+	fi
+	if [ -f $PRD/data/DWI/*.nii ]
+	then
+		ls $PRD/data/DWI/ | grep .nii | xargs -I {} mrconvert $PRD/data/DWI/{} $PRD/connectivity_regions/dwi.mif 
+	else
+		mrconvert $PRD/data/DWI/ $PRD/connectivity_regions/dwi.mif
+	fi
 fi
 # brainmask 
 if [ ! -f $PRD/connectivity_regions/lowb.nii  ]
 then
-average $PRD/connectivity_regions/dwi.mif -axis 3 $PRD/connectivity_regions/lowb.nii
+	average $PRD/connectivity_regions/dwi.mif -axis 3 $PRD/connectivity_regions/lowb.nii
 fi
 if [ ! -f $PRD/connectivity_regions/mask_not_checked.mif ]
 then
-threshold -percent $percent_value_mask $PRD/connectivity_regions/lowb.nii - | median3D - - | median3D - $PRD/connectivity_regions/mask_not_checked.mif
+	threshold -percent $percent_value_mask $PRD/connectivity_regions/lowb.nii - | median3D - - | median3D - $PRD/connectivity_regions/mask_not_checked.mif
 fi
 
 # check the mask
