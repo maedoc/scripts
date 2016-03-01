@@ -1,3 +1,5 @@
+#!/bin/bash
+
 ######### import config
 while getopts ":c:" opt; do
      case $opt in
@@ -6,8 +8,8 @@ while getopts ":c:" opt; do
          echo "use config file $CONFIG" >&2
          if [ ! -f $CONFIG ]
          then
-         echo "config file unexistent" >&2
-         exit 1
+		 echo "config file unexistent" >&2
+		 exit 1
          fi
          source "$CONFIG"
          ;;
@@ -30,7 +32,7 @@ fi
 
 if [ ! -n "$number_tracks" ]
 then
-    echo "config file not correct"
+    echo "config file does not provide the number_tracks parameter"
     exit 1
 fi
 
@@ -43,140 +45,114 @@ else
     export FS=$SUBJECTS_DIR
 fi
 
-######### build cortical surface and region mapping
-if [ ! -f $PRD/data/T1/T1.nii.gz ]
-then
-    echo "generating T1 from DICOM"
-    mrconvert $PRD/data/T1/ $PRD/data/T1/T1.nii.gz
-fi
+# reusable functions
+function log() {
+	# TODO add date, verbosity, etc?
+	echo "[scripts] $@"
+}
 
-###################### freesurfer
-if [ ! -d $FS/$SUBJ_ID ] 
-then
-    echo "running recon-all of freesurfer"
-    recon-all -i $PRD/data/T1/T1.nii.gz -s $SUBJ_ID -all
-fi
+function gen() {
+	# get file & function names
+	target=$1
+	funcname=$2
+	# remove those two arguments from arg list, rest go to function
+	shift 2
 
-###################################### left hemisphere
-# export pial into text file
-mkdir -p $PRD/surface
-if [ ! -f $PRD/surface/lh.pial.asc ]
-then
-    echo "importing left pial surface from freesurfer"
-    mris_convert $FS/$SUBJ_ID/surf/lh.pial $PRD/surface/lh.pial.asc
-    # take care of the c_(ras) shift which is not done by FS (thks FS!)
-    mris_info $FS/$SUBJ_ID/surf/lh.pial >& $PRD/surface/lhinfo.txt
-fi
+	# TODO allow interactive remaking
+	#if [ -e $target && $interactive=="yes" ]
+	#then
+	#    echo "remake $target? "
+	#fi
+		
+	if [ ! -e $target ]
+	then
+		log "$target does not exist"
+		log "generating $target with $funcname $target $@"
+		$funcname $target $@
+	else
+		log "$target exists, not regenerating"
+	fi
+}
 
-# triangles and vertices high
-if [ ! -f $PRD/surface/lh_vertices_high.txt ]
-then
-    echo "extracting left vertices and triangles"
-    python extract_high.py lh
-fi
+function convert_to_niigz() {
+	mrconvert $2 $1
+}
 
-# decimation using brainvisa
-if [ ! -f $PRD/surface/lh_vertices_low.txt ]
-then
-    echo "left decimation using remesher"
-    # -> to mesh
-    python txt2off.py $PRD/surface/lh_vertices_high.txt $PRD/surface/lh_triangles_high.txt $PRD/surface/lh_high.off
-    #  decimation
-    ./remesher/cmdremesher/cmdremesher $PRD/surface/lh_high.off $PRD/surface/lh_low.off
-    # export to list vertices triangles
-    python off2txt.py $PRD/surface/lh_low.off $PRD/surface/lh_vertices_low.txt $PRD/surface/lh_triangles_low.txt
-fi
+function fs_recon_all() {
+	recon-all -i $2 -s $3 -all
+}
 
-# create left the region mapping
-if [ ! -f $PRD/surface/lh_region_mapping_low_not_corrected.txt ]
-then
-    echo "generating the left region mapping on the decimated surface"
-    if [ -n "$matlab" ]
-    then
-        $matlab -r "rl='lh';run region_mapping.m; quit;" -nodesktop -nodisplay
-    else
-        sh region_mapping/distrib/run_region_mapping.sh $MCR
-    fi
-fi
+function ascii_surface() {
+	mris_convert $FS/$SUBJ_ID/surf/$2.pial $PRD/surface/$2.pial.asc
+	mris_info $FS/$SUBJ_ID/surf/$2.pial >& $PRD/surface/${2}info.txt
+	python extract_high.py $2
+}
 
-# correct
-if [ ! -f $PRD/surface/lh_region_mapping_low.txt ]
-then
-    echo "correct the left region mapping"
-    python correct_region_mapping.py lh
-    echo "check left region mapping"
-    python check_region_mapping.py lh
-fi
+function remesh() {
+	python txt2off.py $PRD/surface/${2}_vertices_high.txt \
+		$PRD/surface/${2}_triangles_high.txt \
+		$PRD/surface/${2}_high.off
+	./remesher/cmdremesher/cmdremesher $PRD/surface/${2}_high.off $PRD/surface/${2}_low.off
+	python off2txt.py $PRD/surface/${2}_low.off \
+	    $PRD/surface/${2}_vertices_low.txt \
+	    $PRD/surface/${2}_triangles_low.txt
+}
 
-###################################### right hemisphere
-# export pial into text file
-if [ ! -f $PRD/surface/rh.pial.asc ]
-then
-    echo "importing right pial surface from freesurfer"
-    mris_convert $FS/$SUBJ_ID/surf/rh.pial $PRD/surface/rh.pial.asc
-    # take care of the c_(ras) shift which is not done by FS (thks FS!)
-    mris_info $FS/$SUBJ_ID/surf/rh.pial >& $PRD/surface/rhinfo.txt
-fi
+function make_region_mapping () {
+	# generate
+	if [ -n "$matlab" ]
+	then
+		$matlab -r "rl='${2}';run region_mapping.m; quit;" -nodesktop -nodisplay
+	else
+		# TODO how does it know which hemisphere?
+		sh region_mapping/distrib/run_region_mapping.sh $MCR
+	fi
+	# correct & check
+	python correct_region_mapping.py ${2}
+	python check_region_mapping.py ${2}
+}
 
-# triangles and vertices high
-if [ ! -f $PRD/surface/rh_vertices_high.txt ]
-then
-    echo "extracting right vertices and triangles"
-    python extract_high.py rh
-fi
+function make_zip() {
+	wd=$1
+	nm=$2
+	shift 2
+	pushd $wd > /dev/null
+	zip $nm $@ -q
+	popd > /dev/null
+}
 
-# decimation using brainvisa
-if [ ! -f $PRD/surface/rh_vertices_low.txt ]
-then
-    echo "right decimation using remesher"
-    # -> to mesh
-    python txt2off.py $PRD/surface/rh_vertices_high.txt $PRD/surface/rh_triangles_high.txt $PRD/surface/rh_high.off
-    #  decimation
-    ./remesher/cmdremesher/cmdremesher $PRD/surface/rh_high.off $PRD/surface/rh_low.off
-    # export to list vertices triangles
-    python off2txt.py $PRD/surface/rh_low.off $PRD/surface/rh_vertices_low.txt $PRD/surface/rh_triangles_low.txt
-fi
+function finalize_surface_data_files() {
+	make_zip $PRD/$SUBJ_ID/surface surface.zip vertices.txt triangles.txt
+	cp $PRD/$SUBJ_ID/surface/region_mapping.txt $PRD/$SUBJ_ID/
+}
 
-if [ ! -f $PRD/surface/rh_region_mapping_low_not_corrected.txt ]
-then
-    echo "generating the right region mapping on the decimated surface"
-    # create left the region mapping
-    if [ -n "$matlab" ]
-    then
-        $matlab -r "rl='rh'; run region_mapping.m; quit;" -nodesktop -nodisplay
-    else
-        sh region_mapping/distrib/run_region_mapping.sh $MCR
-    fi
-fi
+function unify_region_mappings() {
+	python reunify_both_regions.py
+}
 
-# correct
-if [ ! -f $PRD/surface/rh_region_mapping_low.txt ]
-then
-    echo " correct the right region mapping"
-    python correct_region_mapping.py rh
-    echo "check right region mapping"
-    python check_region_mapping.py rh
-fi
-###################################### both hemisphere
-# prepare final directory
-mkdir -p $PRD/$SUBJ_ID
-mkdir -p $PRD/$SUBJ_ID/surface
+# make directory structure
+mkdir -p $PRD{/surface,/connectivity} $PRD/$SUBJ_ID/{surface,connectivity}
 
-# reunify both region_mapping, vertices and triangles
-if [ ! -f $PRD/$SUBJ_ID/surface/region_mapping.txt ]
-then
-    echo "reunify both region mappings"
-    python reunify_both_regions.py
-fi
+# build cortical surface and region mapping
+T1=$PRD/data/T1/T1.nii.gz
 
-# zip to put in final format
-pushd . > /dev/null
-cd $PRD/$SUBJ_ID/surface > /dev/null
-zip $PRD/$SUBJ_ID/surface.zip vertices.txt triangles.txt -q
-cp region_mapping.txt ..
-popd > /dev/null
+gen convert_to_niigz $T1 $PRD/data/T1/
+gen fs_recon_all $FS/$SUBJ_ID $T1 $SUBJ_ID
 
-########################### subcortical surfaces
+hemi=lh
+gen ascii_surface $PRD/surface/${hemi}_vertices_high.txt $hemi
+gen remesh $PRD/surface/${hemi}_vertices_low.txt $hemi
+gen make_region_mapping $PRD/surface/${hemi}_region_mapping_low.txt $hemi
+
+hemi=rh
+gen ascii_surface $PRD/surface/${hemi}_vertices_high.txt $hemi
+gen remesh $PRD/surface/${hemi}_vertices_low.txt $hemi
+gen make_region_mapping $PRD/surface/${hemi}_region_mapping_low.txt $hemi
+
+gen unify_region_mappings $PRD/$SUBJ_ID/surface/region_mapping.txt
+
+gen finalize_surface_data_files $PRD/SUBJ_ID/surface.zip
+
 # extract subcortical surfaces 
 if [ ! -f $PRD/surface/subcortical/aseg_058_vert.txt ]
 then
@@ -187,11 +163,7 @@ then
     python list_subcortical.py
 fi
 
-########################## build connectivity using mrtrix 3
-mkdir -p $PRD/connectivity
-mkdir -p $PRD/$SUBJ_ID/connectivity
-
-
+# convert DWI files
 # if single acquisition  with reversed directions
 function mrchoose () {
     choice=$1
@@ -249,11 +221,13 @@ else
     fi
 fi
 
+# make brain mask
 if [ ! -f $PRD/connectivity/mask.mif ]
 then
     dwi2mask $PRD/connectivity/dwi.mif $PRD/connectivity/mask.mif
 fi
 
+# extract b=0
 if [ ! -f $PRD/connectivity/lowb.nii.gz ]
 then
     dwiextract $PRD/connectivity/dwi.mif $PRD/connectivity/lowb.mif -bzero
@@ -261,115 +235,101 @@ then
 fi
 
 # FLIRT registration
-#Diff to T1
-if [ ! -f $PRD/connectivity/T1.nii.gz ]
-then
-    echo "generating good orientation for T1"
-    mri_convert --in_type mgz --out_type nii --out_orientation RAS $FS/$SUBJ_ID/mri/T1.mgz $PRD/connectivity/T1.nii.gz
-fi
 
-if [ ! -f $PRD/connectivity/aparc+aseg.nii.gz ]
-then
-    echo " getting aparc+aseg"
-    mri_convert --in_type mgz --out_type nii --out_orientation RAS $FS/$SUBJ_ID/mri/aparc+aseg.mgz $PRD/connectivity/aparc+aseg.nii.gz
-fi
+# make t1 & parcseg in ras orientation, nifti format
+for im in T1 aparc+aseg; do
+	mri_convert --in_type mgz --out_type nii --out_orientation RAS \
+		$FS/$SUBJ_ID/mri/${im}.mgz \
+		$PRD/connectivity/${im}.nii.gz
+done
 
+pushd $PRD/connectivity
 
-if [ ! -f $PRD/connectivity/aparc+aseg_reorient.nii.gz ]
-then
-    echo "reorienting the region parcellation"
-    fslreorient2std $PRD/connectivity/aparc+aseg.nii.gz $PRD/connectivity/aparc+aseg_reorient.nii.gz
-    # check parcellation to T1
-    if [ -n "$DISPLAY" ] && [ "$CHECK" = "yes" ]
-    then
-        echo "check parcellation"
-        echo " if it's correct, just close the window. Otherwise... well, it should be correct anyway"
-        "$FSL"fslview $PRD/connectivity/T1.nii.gz $PRD/connectivity/aparc+aseg_reorient.nii.gz -l "Cool"
-    fi
-fi
+# standardize parc orientation
+fslreorient2std aparc+aseg.nii.gz aparc+aseg_reorient.nii.gz
+"$FSL"fslview T1.nii.gz aparc+aseg_reorient.nii.gz -l "Cool" # TODO redo nibabel+mpl
 
-if [ ! -f $PRD/connectivity/aparcaseg_2_diff.nii.gz ]
-then
-    echo " register aparc+aseg to diff"
-    "$FSL"flirt -in $PRD/connectivity/lowb.nii.gz -ref $PRD/connectivity/T1.nii.gz -omat $PRD/connectivity/diffusion_2_struct.mat -out $PRD/connectivity/lowb_2_struct.nii.gz -dof 12 -searchrx -180 180 -searchry -180 180 -searchrz -180 180 -cost mutualinfo
-    "$FSL"convert_xfm -omat $PRD/connectivity/diffusion_2_struct_inverse.mat -inverse $PRD/connectivity/diffusion_2_struct.mat
-    "$FSL"flirt -applyxfm -in $PRD/connectivity/aparc+aseg_reorient.nii.gz -ref $PRD/connectivity/lowb.nii.gz -out $PRD/connectivity/aparcaseg_2_diff.nii.gz -init $PRD/connectivity/diffusion_2_struct_inverse.mat -interp nearestneighbour
+# find xfm from diff to t1, apply to parc & t1
 
-    if [ ! -f $PRD/connectivity/T1_2_diff.nii.gz ]
-    then
-        echo " register aparc+aseg to diff"
-        "$FSL"flirt -applyxfm -in $PRD/connectivity/T1.nii.gz -ref $PRD/connectivity/lowb.nii.gz -out $PRD/connectivity/T1_2_diff.nii.gz -init $PRD/connectivity/diffusion_2_struct_inverse.mat -interp nearestneighbour
-    fi
+## find affine registration from diff to t1 w/ highest mutual information
+"$FSL"flirt -in   lowb.nii.gz \
+	    -ref  T1.nii.gz   \
+	    -omat diffusion_2_struct.mat \
+	    -out  lowb_2_struct.nii.gz \
+	    -dof 12 -searchrx -180 180 -searchry -180 180 -searchrz -180 180 -cost mutualinfo
 
-    # check parcellation to diff
-    if [ -n "$DISPLAY" ]  && [ "$CHECK" = "yes" ]
-    then
-        echo "check parcellation registration to diffusion space"
-        echo "if it's correct, just close the window. Otherwise you will have to
-        do the registration by hand"
-        "$FSL"fslview $PRD/connectivity/T1_2_diff.nii.gz $PRD/connectivity/lowb.nii.gz $PRD/connectivity/aparcaseg_2_diff -l "Cool"
-    fi
-fi
+## invert transform
+"$FSL"convert_xfm \
+	-omat    diffusion_2_struct_inverse.mat \
+	-inverse diffusion_2_struct.mat
+
+## apply to parc
+"$FSL"flirt -applyxfm \
+	-in   aparc+aseg_reorient.nii.gz \
+	-ref  lowb.nii.gz \
+	-out  aparcaseg_2_diff.nii.gz \
+	-init diffusion_2_struct_inverse.mat \
+	-interp nearestneighbour
+
+## apply to t1
+"$FSL"flirt -applyxfm \
+	-in   T1.nii.gz \
+	-ref  lowb.nii.gz \
+	-out  T1_2_diff.nii.gz \
+	-init diffusion_2_struct_inverse.mat \
+	-interp nearestneighbour
+
+## check
+"$FSL"fslview \
+	T1_2_diff.nii.gz \
+	lowb.nii.gz \
+	aparcaseg_2_diff \
+	-l "Cool"
+
 
 # response function estimation
-if [ ! -f $PRD/connectivity/response.txt ]
-then
-    echo "estimating response"
-    dwi2response $PRD/connectivity/dwi.mif $PRD/connectivity/response.txt -mask $PRD/connectivity/mask.mif 
-fi
+dwi2response dwi.mif response.txt -mask mask.mif 
 
+# fibre orientation distribution estimation if [ ! -f CSD$lmax.mif ]
+dwi2fod dwi.mif response.txt CSD$lmax.mif -lmax $lmax -mask mask.mif
 
-# fibre orientation distribution estimation
-if [ ! -f $PRD/connectivity/CSD$lmax.mif ]
-then
-    echo "calculating fod"
-    dwi2fod $PRD/connectivity/dwi.mif $PRD/connectivity/response.txt $PRD/connectivity/CSD$lmax.mif -lmax $lmax -mask $PRD/connectivity/mask.mif
-fi
-
-# prepare file for act
-if [ "$act" = "yes" ] && [ ! -f $PRD/connectivity/act.mif ]
-then
-    echo "prepare files for act"
-    act_anat_prepare_fsl $PRD/connectivity/T1_2_diff.nii.gz $PRD/connectivity/act.mif
-fi
+# prepare file for act if [ "$act" = "yes" ] && [ ! -f act.mif ]
+act_anat_prepare_fsl T1_2_diff.nii.gz act.mif
 
 # tractography
-if [ ! -f $PRD/connectivity/whole_brain.tck ]
-then
-    if [ "$act" = "yes" ]
-    then
-        echo "generating tracks using act" 
-        5tt2gmwmi $PRD/connectivity/act.mif $PRD/connectivity/gmwmi_mask.mif
-        tckgen $PRD/connectivity/CSD$lmax.mif $PRD/connectivity/whole_brain.tck -unidirectional -seed_gmwmi $PRD/connectivity/gmwmi_mask.mif -num $number_tracks -act $PRD/connectivity/act.mif -maxlength 250 -step 0.5
-    else
-        echo "generating tracks without using act" 
-        tckgen $PRD/connectivity/CSD$lmax.mif $PRD/connectivity/whole_brain.tck -unidirectional -algorithm iFOD2 -seed_image $PRD/connectivity/aparcaseg_2_diff.nii.gz -mask $PRD/connectivity/mask.mif -maxlength 250 -step 0.5 -num $number_tracks
-    fi
+if [ ! -f whole_brain.tck ] ; then
+	if [ "$act" = "yes" ] ; then
+		5tt2gmwmi act.mif gmwmi_mask.mif
+		tckgen_args="-seed_gmwmi gmwmi_mask.mif -act act.mif"
+	else
+		tckgen_args="-algorithm iFOD2 -seed_image aparcaseg_2_diff.nii.gz -mask mask.mif"
+	fi
+	tckgen_args="-unidirectional -num $number_tracks -maxlength 250 -step 0.5 $tck_args"
+	tckgen CSD$lmax.mif whole_brain.tck $tckgen_args
 fi
 
-if [ "$sift" = "yes" ] && [ ! -f $PRD/connectivity/whole_brain_post.tck ]
+# post process with sift
+if [ "$sift" = "yes" ] && [ ! -f whole_brain_post.tck ]
 then
-    echo "using sift"
-    if [ "$act" = "yes" ]
-    then
-        tcksift $PRD/connectivity/whole_brain.tck $PRD/connectivity/CSD"$lmax".mif  $PRD/connectivity/whole_brain_post.tck -act $PRD/connectivity/act.mif -term_number $(( number_tracks/2 ))
-    else
-        tcksift $PRD/connectivity/whole_brain.tck $PRD/connectivity/CSD"$lmax".mif  $PRD/connectivity/whole_brain_post.tck -term_number $(( number_tracks/2 ))
-    fi
-    elif [ ! -f $PRD/connectivity/whole_brain_post.tck ]
-    then
-        echo "not using SIFT"
-        ln -s $PRD/connectivity/whole_brain.tck  $PRD/connectivity/whole_brain_post.tck
+	echo "using sift"
+	tcksift_args="-term_number $(( number_tracks/2 ))"
+	if [ "$act" = "yes" ] ; then
+		tcksift_args="-act act.mif $tcksift_args" 
+	fi
+	tcksift whole_brain.tck CSD"$lmax".mif whole_brain_post.tck $tcksift_args
+elif [ ! -f whole_brain_post.tck ] ; then
+	echo "not using SIFT"
+	ln -s whole_brain.tck whole_brain_post.tck
 fi
 
+popd # $PRD/connectivity
 
-# now compute connectivity and length matrix
+# now compute connectivity and length matrix without subdivisions
 if [ ! -f $PRD/connectivity/aparcaseg_2_diff.mif ]
 then
     echo " compute labels"
     labelconfig $PRD/connectivity/aparcaseg_2_diff.nii.gz fs_region.txt $PRD/connectivity/aparcaseg_2_diff.mif -lut_freesurfer $FREESURFER_HOME/FreeSurferColorLUT.txt
 fi
-
 if [ ! -f $PRD/connectivity/weights.csv ]
 then
     echo "compute connectivity matrix"
@@ -395,7 +355,6 @@ cd $PRD/$SUBJ_ID/connectivity > /dev/null
 zip $PRD/$SUBJ_ID/connectivity.zip areas.txt average_orientations.txt weights.txt tract_lengths.txt cortical.txt centres.txt -q
 popd > /dev/null 
 
-###################################################
 # compute sub parcellations connectivity if asked
 if [ -n "$K_list" ]
 then
@@ -403,7 +362,6 @@ then
     do
         export curr_K=$(( 2**K ))
         mkdir -p $PRD/$SUBJ_ID/connectivity_"$curr_K"
-
         if [ -n "$matlab" ]  
         then
             if [ ! -f $PRD/connectivity/aparcaseg_2_diff_"$curr_K".nii.gz ]
@@ -418,25 +376,21 @@ then
             gzip $PRD/connectivity/aparcaseg_2_diff_"$curr_K".nii
             fi
         fi
-
         if [ ! -f $PRD/connectivity/aparcaseg_2_diff_"$curr_K".mif ]
         then
             labelconfig $PRD/connectivity/aparcaseg_2_diff_"$curr_K".nii.gz $PRD/connectivity/corr_mat_"$curr_K".txt $PRD/connectivity/aparcaseg_2_diff_"$curr_K".mif  -lut_basic $PRD/connectivity/corr_mat_"$curr_K".txt
         fi
-
         if [ ! -f $PRD/connectivity/weights_$curr_K.csv ]
         then
             echo "compute connectivity sub matrix using act"
             tck2connectome $PRD/connectivity/whole_brain_post.tck $PRD/connectivity/aparcaseg_2_diff_"$curr_K".mif $PRD/connectivity/weights_"$curr_K".csv -assignment_radial_search 2
             tck2connectome  $PRD/connectivity/whole_brain_post.tck $PRD/connectivity/aparcaseg_2_diff_"$curr_K".mif $PRD/connectivity/tract_lengths_"$curr_K".csv -metric meanlength -assignment_radial_search 2 -zero_diagonal 
         fi
-
         if [ ! -f $PRD/$SUBJ_ID/connectivity_"$curr_K"/weights.txt ]
         then
             echo "generate files for TVB subparcellations"
             python compute_connectivity_sub.py $PRD/connectivity/weights_"$curr_K".csv $PRD/connectivity/tract_lengths_"$curr_K".csv $PRD/$SUBJ_ID/connectivity_"$curr_K"/weights.txt $PRD/$SUBJ_ID/connectivity_"$curr_K"/tract_lengths.txt
         fi
-
         pushd . > /dev/null
         cd $PRD/$SUBJ_ID/connectivity_"$curr_K" > /dev/null
         zip $PRD/$SUBJ_ID/connectivity_"$curr_K".zip weights.txt tract_lengths.txt centres.txt average_orientations.txt -q 
