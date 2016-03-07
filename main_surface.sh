@@ -139,18 +139,14 @@ T1=$PRD/data/T1/T1.nii.gz
 gen convert_to_niigz $T1 $PRD/data/T1/
 gen fs_recon_all $FS/$SUBJ_ID $T1 $SUBJ_ID
 
-hemi=lh
-gen ascii_surface $PRD/surface/${hemi}_vertices_high.txt $hemi
-gen remesh $PRD/surface/${hemi}_vertices_low.txt $hemi
-gen make_region_mapping $PRD/surface/${hemi}_region_mapping_low.txt $hemi
+for hemi in lh rh
+do
+	gen ascii_surface $PRD/surface/${hemi}_vertices_high.txt $hemi
+	gen remesh $PRD/surface/${hemi}_vertices_low.txt $hemi
+	gen make_region_mapping $PRD/surface/${hemi}_region_mapping_low.txt $hemi
+done
 
-hemi=rh
-gen ascii_surface $PRD/surface/${hemi}_vertices_high.txt $hemi
-gen remesh $PRD/surface/${hemi}_vertices_low.txt $hemi
-gen make_region_mapping $PRD/surface/${hemi}_region_mapping_low.txt $hemi
-
-gen unify_region_mappings $PRD/$SUBJ_ID/surface/region_mapping.txt
-
+gen unify_region_mappings 	$PRD/$SUBJ_ID/surface/region_mapping.txt
 gen finalize_surface_data_files $PRD/SUBJ_ID/surface.zip
 
 # extract subcortical surfaces 
@@ -173,123 +169,75 @@ $choice
 EOF
 }
 
+function extract_dwi_series() {
+	series_id=$1
+	data_path=$2
+	mrchoose $series_id mrconvert $data_path dwi_${series_id}.nii.gz
+	mrchoose $series_id mrinfo $data_path -export_grad_fsl \
+		bvecs_${series_id} bvals_${series_id}
+}
+
+pushd $PRD/connectivity
+
+
 if [ "$topup" = "reversed" ]
 then
     echo "use topup and eddy from fsl to correct EPI distortions"
 
-    if [ ! -f $PRD/connectivity/dwi_1.nii.gz ]
+    if [ ! -f dwi_1.nii.gz ]
     then
-        mrchoose 0 mrconvert $PRD/data/DWI/ $PRD/connectivity/dwi_1.nii.gz
-        mrchoose 0 mrinfo $PRD/data/DWI/ -export_grad_fsl $PRD/connectivity/bvecs_1 $PRD/connectivity/bvals_1
-        mrchoose 1 mrconvert $PRD/data/DWI/ $PRD/connectivity/dwi_2.nii.gz
-        mrchoose 1 mrinfo $PRD/data/DWI/ -export_grad_fsl $PRD/connectivity/bvecs_2 $PRD/connectivity/bvals_2
-        mrconvert $PRD/connectivity/dwi_1.nii.gz $PRD/connectivity/dwi_1.mif -fslgrad $PRD/connectivity/bvecs_1 $PRD/connectivity/bvals_1
-        mrconvert $PRD/connectivity/dwi_2.nii.gz $PRD/connectivity/dwi_2.mif -fslgrad $PRD/connectivity/bvecs_2 $PRD/connectivity/bvals_2
+        extract_dwi_series 0 $PRD/data/DWI/
+        extract_dwi_series 1 $PRD/data/DWI/
+        mrconvert dwi_1.nii.gz dwi_1.mif -fslgrad bvecs_1 bvals_1
+        mrconvert dwi_2.nii.gz dwi_2.mif -fslgrad bvecs_2 bvals_2
     fi
-    if [ ! -f $PRD/connectivity/dwi.mif ]
+    if [ ! -f dwi.mif ]
     then
-        revpe_dwicombine $PRD/connectivity/dwi_1.mif $PRD/connectivity/dwi_2.mif 1 $PRD/connectivity/dwi.mif
+        revpe_dwicombine dwi_1.mif dwi_2.mif 1 dwi.mif
     fi
 else
     # mrconvert
-    if [ ! -f $PRD/connectivity/dwi.nii.gz ]
+    if [ ! -f dwi.nii.gz ]
     then
         if [ -f $PRD/data/DWI/*.nii.gz ]
         then
             echo "use already existing nii files"
-            ls $PRD/data/DWI/ | grep '.nii.gz$' | xargs -I {} cp $PRD/data/DWI/{} $PRD/connectivity/dwi.nii.gz
-            cp $PRD/data/DWI/bvecs $PRD/connectivity/bvecs
-            cp $PRD/data/DWI/bvals $PRD/connectivity/bvals
+            ls $PRD/data/DWI/ | grep '.nii.gz$' | xargs -I {} cp $PRD/data/DWI/{} dwi.nii.gz
+            cp $PRD/data/DWI/bvecs bvecs
+            cp $PRD/data/DWI/bvals bvals
         else
             echo "generate dwi.nii.gz"
-            mrconvert $PRD/data/DWI/ $PRD/connectivity/dwi.nii.gz
+            mrconvert $PRD/data/DWI/ dwi.nii.gz
             echo "extract bvecs and bvals"
-            mrinfo $PRD/data/DWI/ -export_grad_fsl $PRD/connectivity/bvecs $PRD/connectivity/bvals
+            mrinfo $PRD/data/DWI/ -export_grad_fsl bvecs bvals
         fi
     fi
     # eddy correct
-    if [ ! -f $PRD/connectivity/dwi.mif ]
+    if [ ! -f dwi.mif ]
     then
         if [ "$topup" =  "eddy_correct" ]
         then
             echo "eddy correct data"
-            "$FSL"eddy_correct $PRD/connectivity/dwi.nii.gz $PRD/connectivity/dwi_eddy_corrected.nii.gz 0
-            mrconvert $PRD/connectivity/dwi_eddy_corrected.nii.gz $PRD/connectivity/dwi.mif -fslgrad $PRD/connectivity/bvecs $PRD/connectivity/bvals
+            "$FSL"eddy_correct dwi.nii.gz dwi_eddy_corrected.nii.gz 0
+            mrconvert dwi_eddy_corrected.nii.gz dwi.mif -fslgrad bvecs bvals
         else
-            mrconvert $PRD/connectivity/dwi.nii.gz $PRD/connectivity/dwi.mif -fslgrad $PRD/connectivity/bvecs $PRD/connectivity/bvals
+            mrconvert dwi.nii.gz dwi.mif -fslgrad bvecs bvals
         fi
     fi
 fi
 
-# make brain mask
-if [ ! -f $PRD/connectivity/mask.mif ]
-then
-    dwi2mask $PRD/connectivity/dwi.mif $PRD/connectivity/mask.mif
-fi
+# make brain mask & extract lowb on mask
+dwi2mask dwi.mif mask.mif
+dwiextract dwi.mif lowb.mif -bzero
+mrconvert lowb.mif lowb.nii.gz 
 
-# extract b=0
-if [ ! -f $PRD/connectivity/lowb.nii.gz ]
-then
-    dwiextract $PRD/connectivity/dwi.mif $PRD/connectivity/lowb.mif -bzero
-    mrconvert $PRD/connectivity/lowb.mif $PRD/connectivity/lowb.nii.gz 
-fi
-
-# FLIRT registration
-
-# make t1 & parcseg in ras orientation, nifti format
-for im in T1 aparc+aseg; do
-	mri_convert --in_type mgz --out_type nii --out_orientation RAS \
-		$FS/$SUBJ_ID/mri/${im}.mgz \
-		$PRD/connectivity/${im}.nii.gz
-done
-
-pushd $PRD/connectivity
-
-# standardize parc orientation
-fslreorient2std aparc+aseg.nii.gz aparc+aseg_reorient.nii.gz
-"$FSL"fslview T1.nii.gz aparc+aseg_reorient.nii.gz -l "Cool" # TODO redo nibabel+mpl
-
-# find xfm from diff to t1, apply to parc & t1
-
-## find affine registration from diff to t1 w/ highest mutual information
-"$FSL"flirt -in   lowb.nii.gz \
-	    -ref  T1.nii.gz   \
-	    -omat diffusion_2_struct.mat \
-	    -out  lowb_2_struct.nii.gz \
-	    -dof 12 -searchrx -180 180 -searchry -180 180 -searchrz -180 180 -cost mutualinfo
-
-## invert transform
-"$FSL"convert_xfm \
-	-omat    diffusion_2_struct_inverse.mat \
-	-inverse diffusion_2_struct.mat
-
-## apply to parc
-"$FSL"flirt -applyxfm \
-	-in   aparc+aseg_reorient.nii.gz \
-	-ref  lowb.nii.gz \
-	-out  aparcaseg_2_diff.nii.gz \
-	-init diffusion_2_struct_inverse.mat \
-	-interp nearestneighbour
-
-## apply to t1
-"$FSL"flirt -applyxfm \
-	-in   T1.nii.gz \
-	-ref  lowb.nii.gz \
-	-out  T1_2_diff.nii.gz \
-	-init diffusion_2_struct_inverse.mat \
-	-interp nearestneighbour
-
-## check
-"$FSL"fslview \
-	T1_2_diff.nii.gz \
-	lowb.nii.gz \
-	aparcaseg_2_diff \
-	-l "Cool"
-
+# coregister diffusion & t1 images
+source register_dwi_t1.sh
 
 # response function estimation
 dwi2response dwi.mif response.txt -mask mask.mif 
 
+# TODO not necessary to specific lmax here
 # fibre orientation distribution estimation if [ ! -f CSD$lmax.mif ]
 dwi2fod dwi.mif response.txt CSD$lmax.mif -lmax $lmax -mask mask.mif
 
@@ -330,6 +278,7 @@ then
     echo " compute labels"
     labelconfig $PRD/connectivity/aparcaseg_2_diff.nii.gz fs_region.txt $PRD/connectivity/aparcaseg_2_diff.mif -lut_freesurfer $FREESURFER_HOME/FreeSurferColorLUT.txt
 fi
+
 if [ ! -f $PRD/connectivity/weights.csv ]
 then
     echo "compute connectivity matrix"
